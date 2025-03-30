@@ -1,0 +1,29 @@
+{
+    "workbench.colorCustomizations": {
+        "editor.inlayHints.fontFamily": "Courier New",
+        "editor.inlayHints.fontSize": 11,
+        "[Gruvbox Material Dark]": {
+            "editorInlayHint.foreground": "#b89c61",
+            "editorInlayHint.background": "#332f2d",
+            "editorInlayHint.typeForeground": "#eeba5b",
+            "editor.background": "#232323"
+        },
+        "[Mayukai Dark]": {
+            "editorInlayHint.foreground": "#2dc485",
+            "editorInlayHint.background": "#0f1018",
+            "editorInlayHint.typeForeground": "#29bec9f0"
+        },
+        "[Mayukai Mono]": {
+            "editorInlayHint.foreground": "#dfa6dc",
+            "editorInlayHint.background": "#141824",
+            "editorInlayHint.typeForeground": "#a6dfdc"
+        },
+        "[Vesper]": {
+            "editorInlayHint.foreground": "#666666",
+            "editorInlayHint.background": "#141824",
+            "editorInlayHint.typeForeground": "#99FFE4"
+        },
+        "minimap.background": "#00000000",
+        "scrollbar.shadow": "#00000000"
+    }
+}
