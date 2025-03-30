@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Preset {
     Custom,
@@ -108,9 +107,7 @@ impl Preset {
                     .chars()
                     .enumerate()
                     .filter(|(_, c)| !c.is_whitespace())
-                    .map(move |(j, _)| {
-                        (start_row + i as isize, start_column + j as isize)
-                    })
+                    .map(move |(j, _)| (start_row + i as isize, start_column + j as isize))
             })
             .collect()
     }
