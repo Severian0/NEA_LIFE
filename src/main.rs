@@ -11,6 +11,7 @@ use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use std::time::Duration;
 
 use rand::Rng;
+use std::collections::VecDeque;
 
 pub fn main() -> iced::Result {
     tracing_subscriber::fmt::init();
@@ -189,6 +190,7 @@ mod grid {
     use iced::widget::canvas::{Cache, Canvas, Frame, Geometry, Path, Text};
     use iced::{Color, Element, Fill, Point, Rectangle, Renderer, Size, Theme, Vector};
     use rustc_hash::{FxHashMap, FxHashSet};
+    use std::collections::VecDeque;
     use std::future::Future;
     use std::ops::RangeInclusive;
     use std::time::{Duration, Instant};
@@ -241,21 +243,20 @@ mod grid {
         const MAX_SCALING: f32 = 2.0;
 
         pub fn from_preset(preset: Preset) -> Self {
-            let cells: FxHashSet<Cell> = preset
+            let cells: Vec<Cell> = preset
                 .life()
                 .into_iter()
                 .map(|(i, j)| Cell {
                     i,
                     j,
-                    cell_type: CellType::Alive,
+                    cell_type: match Life::chance(50.0) {
+                        true => CellType::Alive,
+                        false => CellType::Grower,
+                    },
                 })
                 .collect();
 
-            let mut organisms = FxHashSet::default();
-            organisms.insert(Organism {
-                cells: cells.clone(),
-                energy: 3,
-            });
+            let mut organisms = Life::find_all_organisms(cells.clone());
 
             Self {
                 state: State::with_life(Life {
@@ -546,6 +547,12 @@ mod grid {
                                 Size::UNIT,
                                 Color::BLACK,
                             );
+                        } else if cell.cell_type == CellType::Grower {
+                            frame.fill_rectangle(
+                                Point::new(cell.j as f32, cell.i as f32),
+                                Size::UNIT,
+                                Color::from_rgb(0.0, 250.0, 0.0),
+                            )
                         }
                     }
                 });
@@ -739,66 +746,78 @@ mod grid {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Organism {
-        cells: FxHashSet<Cell>,
+        cells: Vec<Cell>,
         energy: usize,
     }
 
     impl Organism {
-        fn new(cells: FxHashSet<Cell>) -> Self {
-            Organism { cells, energy: 3 }
+        fn new(cells: Vec<Cell>) -> Self {
+            Organism { cells, energy: 0 }
         }
 
         fn len(&self) -> usize {
             self.cells.len()
         }
-        fn contains(&self, cell: &Cell) -> bool {
+        pub fn contains(&self, cell: &Cell) -> bool {
             self.cells.contains(cell)
         }
 
         fn populate(&mut self, cell: Cell) {
-            self.cells.insert(cell);
+            if !self.contains(&cell) {
+                self.cells.push(cell)
+            }
         }
 
         fn unpopulate(&mut self, cell: &Cell) {
-            let _ = self.cells.remove(cell);
+            self.cells.retain(|c| c != cell);
         }
 
         // want to create a way for food to be eaten, organism to reproduce and randomly evolve.
-        fn adjacent_food(&self, life: &Life) -> FxHashSet<Cell> {
-            let mut food = FxHashSet::default();
 
+        pub fn adjacent_food(&self, life: &Life) -> Vec<Cell> {
+            let mut food = Vec::new();
             for cell in &self.cells {
                 for neighbor in Cell::neighbors(*cell) {
-                    if let Some(food_cell) = life.cells.get(&neighbor) {
-                        if food_cell.cell_type == CellType::Food {
-                            food.insert(*food_cell);
+                    if let Some(food_cell) = life.cells.iter().find(|c| **c == neighbor) {
+                        if food_cell.cell_type == CellType::Food && !self.contains(food_cell) {
+                            if !food.contains(food_cell) {
+                                food.push(*food_cell);
+                            }
                         }
                     }
                 }
             }
-
             food
         }
 
         pub fn consume_food(&mut self, life: &mut Life) {
             let mut gained_energy = 0;
-            let mut food_to_remove = FxHashSet::default();
+            let mut food_to_remove = Vec::new();
 
             for cell in &self.cells {
                 for neighbor in Cell::neighbors(*cell) {
-                    if let Some(food_cell) = life.cells.get(&neighbor) {
-                        if food_cell.is_food() {
+                    if let Some(food_cell) = life.cells.iter().find(|c| **c == neighbor) {
+                        if food_cell.cell_type == CellType::Food {
                             gained_energy += 1;
-                            food_to_remove.insert(*food_cell);
+                            if !food_to_remove.contains(food_cell) {
+                                food_to_remove.push(*food_cell);
+                            }
                         }
                     }
                 }
             }
 
             self.energy += gained_energy;
-            for food in food_to_remove {
-                life.cells.remove(&food);
-            }
+            life.cells.retain(|c| !food_to_remove.contains(c));
+        }
+
+        /// Helper: Compute the bounding box of the organism as (min_j, max_j, min_i, max_i)
+        pub fn bounding_box(&self) -> (isize, isize, isize, isize) {
+            let min_j = self.cells.iter().map(|c| c.j).min().unwrap_or(0);
+            let max_j = self.cells.iter().map(|c| c.j).max().unwrap_or(0);
+            let min_i = self.cells.iter().map(|c| c.i).min().unwrap_or(0);
+            let max_i = self.cells.iter().map(|c| c.i).max().unwrap_or(0);
+            (min_j, max_j, min_i, max_i)
         }
     }
 
@@ -806,11 +825,13 @@ mod grid {
 
     #[derive(Clone, Default)]
     pub struct Life {
-        cells: FxHashSet<Cell>,
-        organisms: FxHashSet<Organism>,
+        cells: Vec<Cell>,
+        organisms: Vec<Organism>,
     }
 
     impl Life {
+        const CHANCE_TO_EAT: f64 = 50.0;
+
         fn len(&self) -> usize {
             self.cells.len()
         }
@@ -820,22 +841,169 @@ mod grid {
         }
 
         fn populate(&mut self, cell: Cell) {
-            self.cells.insert(cell);
+            if !self.contains(&cell) {
+                self.cells.push(cell);
+            }
         }
 
         fn unpopulate(&mut self, cell: &Cell) {
-            let _ = self.cells.remove(cell);
+            self.cells.retain(|c| c != cell);
         }
 
-        fn move_organisms(&mut self) {
+        fn create_organism_from_cell_clump(cells: Vec<Cell>, start_cell: Cell) -> Organism {
+            let mut organism_cells: Vec<Cell> = Vec::new();
+
+            let mut visited = Vec::new();
+            let mut queue = VecDeque::new();
+
+            queue.push_back(start_cell);
+            visited.push(start_cell);
+
+            while let Some(cell) = queue.pop_front() {
+                organism_cells.push(cell);
+
+                // Define possible movement directions (up, down, left, right)
+                let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
+                for &(dx, dy) in &directions {
+                    let neighbor = Cell {
+                        i: cell.i + dy,
+                        j: cell.j + dx,
+                        cell_type: cell.cell_type, // Assume same type for simplicity
+                    };
+
+                    // Check if neighbor is a valid cell & not visited
+                    if cells.contains(&neighbor) && !visited.contains(&neighbor) {
+                        queue.push_back(neighbor);
+                        visited.push(neighbor);
+                    }
+                }
+            }
+            Organism::new(organism_cells)
+        }
+
+        pub fn grow_food(&mut self) {
+            let mut new_food_cells = Vec::new();
+
+            for cell in &self.cells {
+                if cell.cell_type == CellType::Grower {
+                    let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
+                    for &(dx, dy) in &directions {
+                        let new_cell = Cell {
+                            i: cell.i + dy,
+                            j: cell.j + dx,
+                            cell_type: CellType::Food,
+                        };
+
+                        // Check if this position is empty
+                        if !self
+                            .cells
+                            .iter()
+                            .any(|c| c.i == new_cell.i && c.j == new_cell.j)
+                        {
+                            new_food_cells.push(new_cell);
+                            break; // Grow only one food per cycle
+                        }
+                    }
+                }
+            }
+
+            // Add new food cells to the world
+            self.cells.extend(new_food_cells);
+        }
+
+        fn chance(percentage: f64) -> bool {
             use rand::Rng;
-            let mut new_organisms = FxHashSet::default();
+            let mut rng = rand::thread_rng();
+            rng.gen::<f64>() < (percentage / 100.0)
+        }
+
+        fn consume_food(&mut self) {
+            let mut new_cells = self.cells.clone();
+
+            for organism in &mut self.organisms {
+                let mut food_cells_to_remove = Vec::new();
+
+                for cell in &organism.cells {
+                    let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
+                    for &(dx, dy) in &directions {
+                        let neighbor = Cell {
+                            i: cell.i + dy,
+                            j: cell.j + dx,
+                            cell_type: CellType::Food,
+                        };
+
+                        // If a food cell is found in the world
+                        if let Some(pos) = new_cells.iter().position(|c| *c == neighbor) {
+                            if Life::chance(Life::CHANCE_TO_EAT) {
+                                food_cells_to_remove.push(pos);
+                                organism.energy += 1; // Increase energy
+                            }
+                        }
+                    }
+                }
+
+                // Remove food cells from the world
+                for &pos in food_cells_to_remove.iter().rev() {
+                    new_cells.remove(pos);
+                }
+            }
+
+            self.cells = new_cells;
+        }
+
+        fn find_all_organisms(cells: Vec<Cell>) -> Vec<Organism> {
+            let mut organisms = Vec::new();
+            let mut visited = Vec::new();
+
+            for &cell in &cells {
+                if visited.contains(&cell) {
+                    continue; // Skip already-processed cells
+                }
+
+                let mut organism_cells = Vec::new();
+                let mut queue = VecDeque::new();
+
+                queue.push_back(cell);
+                visited.push(cell);
+
+                while let Some(current) = queue.pop_front() {
+                    organism_cells.push(current);
+
+                    let directions = [(0, 1), (0, -1), (1, 0), (-1, 0)];
+
+                    for &(dx, dy) in &directions {
+                        let neighbor = Cell {
+                            i: current.i + dy,
+                            j: current.j + dx,
+                            cell_type: current.cell_type,
+                        };
+
+                        // Check if it's a valid cell and hasn't been visited
+                        if cells.contains(&neighbor) && !visited.contains(&neighbor) {
+                            queue.push_back(neighbor);
+                            visited.push(neighbor);
+                        }
+                    }
+                }
+
+                organisms.push(Organism::new(organism_cells));
+            }
+
+            organisms
+        }
+
+        pub fn move_organisms(&mut self) {
+            use rand::Rng;
+            let mut new_organisms = Vec::new();
             let mut new_cells = self.cells.clone(); // Keep all existing cells
 
             let mut rng = rand::thread_rng();
 
             for organism in &self.organisms {
-                let mut new_organism_cells = FxHashSet::default();
+                let mut new_organism_cells = Vec::new();
                 let mut can_move = true;
 
                 // Random movement: right (+1, 0), left (-1, 0), up (0, -1), down (0, +1)
@@ -846,539 +1014,156 @@ mod grid {
                     _ => (0, -1), // Move up
                 };
 
-                // First check if organism can move in chosen direction
+                // Check if all cells can move in the chosen direction
                 for cell in &organism.cells {
                     let potential_new_position = Cell {
-                        i: (cell.i as isize + dy),
-                        j: (cell.j as isize + dx),
+                        i: cell.i + dy,
+                        j: cell.j + dx,
                         cell_type: cell.cell_type,
                     };
 
-                    // Check if destination is already occupied by a cell that doesn't belong to this organism
-                    for existing_cell in &self.cells {
-                        if existing_cell.i == potential_new_position.i
+                    // Ensure the destination is not occupied by another organism or food (unless it's part of itself)
+                    if self.cells.iter().any(|existing_cell| {
+                        existing_cell.i == potential_new_position.i
                             && existing_cell.j == potential_new_position.j
-                            && existing_cell.cell_type == CellType::Food
+                            && existing_cell.cell_type != CellType::Food
                             && !organism.contains(existing_cell)
-                        {
-                            // Destination contains food and is not part of this organism
-                            can_move = false;
-                            break;
-                        }
-                    }
-
-                    if !can_move {
+                    }) {
+                        can_move = false;
                         break;
                     }
                 }
 
                 if can_move {
-                    // Remove old organism cells
+                    // Remove old organism cells from `new_cells`
                     for cell in &organism.cells {
-                        new_cells.remove(cell);
+                        new_cells.retain(|c| c != cell);
                     }
 
-                    // Add cells at new positions
+                    // Move the organism cells to new positions
                     for cell in &organism.cells {
                         let new_cell = Cell {
-                            i: (cell.i as isize + dy),
-                            j: (cell.j as isize + dx),
+                            i: cell.i + dy,
+                            j: cell.j + dx,
                             cell_type: cell.cell_type,
                         };
-
-                        new_organism_cells.insert(new_cell);
-                        new_cells.insert(new_cell);
+                        new_organism_cells.push(new_cell);
+                        new_cells.push(new_cell);
                     }
                 } else {
-                    // Cannot move, keep organism in place
+                    // If movement is not possible, keep the organism in place
                     for cell in &organism.cells {
-                        new_organism_cells.insert(*cell);
-                        // Make sure to keep the existing cells in the new_cells collection too
-                        new_cells.insert(*cell);
+                        new_organism_cells.push(*cell);
+                        if !new_cells.contains(cell) {
+                            new_cells.push(*cell);
+                        }
                     }
                 }
 
-                new_organisms.insert(Organism::new(new_organism_cells));
+                new_organisms.push(Organism::new(new_organism_cells));
             }
 
+            // Update the world's state
             self.organisms = new_organisms;
             self.cells = new_cells;
         }
-
-        /*
-
-        const REPRODUCTION_ENERGY: usize = 3;
-
-        fn handle_reproduction(&mut self) {
-            let mut new_organisms = FxHashSet::default();
-            let mut cells_to_remove = FxHashSet::default();
-
-            for organism in &self.organisms {
-                if organism.energy < Self::REPRODUCTION_ENERGY {
-                    new_organisms.insert(organism.clone());
-                    continue;
-                }
-
-                if let Some((offspring, consumed_food)) = self.try_reproduce(organism) {
-                    // Add offspring and update parent
-                    new_organisms.insert(offspring);
-                    let mut parent = organism.clone();
-                    parent.energy -= Self::REPRODUCTION_ENERGY;
-                    new_organisms.insert(parent);
-
-                    // Mark food for removal
-                    cells_to_remove.extend(consumed_food);
-                } else {
-                    new_organisms.insert(organism.clone());
-                }
-            }
-
-            // Update game state
-            self.organisms = new_organisms;
-            self.cells.retain(|cell| !cells_to_remove.contains(cell));
-        }
-
-        fn try_reproduce(&self, parent: &Organism) -> Option<(Organism, FxHashSet<Cell>)> {
-            use rand::prelude::SliceRandom;
-            let (width, height) = self.organism_dimensions(parent);
-            let directions = [
-                (1, 0, width),   // Right (needs width spacing)
-                (-1, 0, width),  // Left (needs width spacing)
-                (0, 1, height),  // Down (needs height spacing)
-                (0, -1, height), // Up (needs height spacing)
-            ];
-
-            let mut rng = rand::thread_rng();
-            let mut directions = directions.to_vec();
-            directions.shuffle(&mut rng);
-
-            for (dx, dy, spacing) in directions {
-                if let Some((offspring, food)) =
-                    self.check_reproduction_space(parent, dx, dy, spacing)
-                {
-                    return Some((offspring, food));
-                }
-            }
-
-            None
-        }
-
-        fn organism_dimensions(&self, organism: &Organism) -> (isize, isize) {
-            let (min_j, max_j, min_i, max_i) = organism.cells.iter().fold(
-                (isize::MAX, isize::MIN, isize::MAX, isize::MIN),
-                |(min_j, max_j, min_i, max_i), cell| {
-                    (
-                        min_j.min(cell.j),
-                        max_j.max(cell.j),
-                        min_i.min(cell.i),
-                        max_i.max(cell.i),
-                    )
-                },
-            );
-
-            let width = (max_j - min_j + 1).max(1);
-            let height = (max_i - min_i + 1).max(1);
-
-            (width, height)
-        }
-
-        fn check_reproduction_space(
-            &self,
-            parent: &Organism,
-            dx: isize,
-            dy: isize,
-            spacing: isize,
-        ) -> Option<(Organism, FxHashSet<Cell>)> {
-            let mut offspring_cells = FxHashSet::default();
-            let mut consumed_food = FxHashSet::default();
-
-            // Check all cells in reproduction path
-            for cell in &parent.cells {
-                for step in 1..=spacing {
-                    let check_cell = Cell {
-                        j: cell.j + dx * step,
-                        i: cell.i + dy * step,
-                        cell_type: CellType::Alive,
-                    };
-
-                    if let Some(existing) = self.cells.get(&check_cell) {
-                        match existing.cell_type {
-                            CellType::Alive => return None, // Collision with living cell
-                            CellType::Food => {
-                                consumed_food.insert(check_cell);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-
-            // Create offspring cells if path is clear
-            for cell in &parent.cells {
-                let new_cell = Cell {
-                    j: cell.j + dx * spacing,
-                    i: cell.i + dy * spacing,
-                    cell_type: CellType::Alive,
-                };
-                offspring_cells.insert(new_cell);
-            }
-
-            // Require at least one food cell consumed
-            if !consumed_food.is_empty() {
-                Some((
-                    Organism {
-                        cells: offspring_cells,
-                        energy: 1,
-                    },
-                    consumed_food,
-                ))
-            } else {
-                None
-            }
-        }
-        */
-        /*
-
-        fn handle_eating_and_reproduction(&mut self) {
-            let mut new_organisms = FxHashSet::default();
-            let mut food_to_remove = Vec::new();
-
-            // Process each organism for eating food
-            for organism in &self.organisms {
-                let mut updated_organism = organism.clone();
-
-                // Find food that's adjacent to any organism cell
-                for cell in &organism.cells {
-                    for neighbor in Cell::neighbors(*cell) {
-                        // Check if this neighbor is a food cell in our global cells collection
-                        if let Some(food_cell) = self.cells.get(&neighbor) {
-                            if food_cell.cell_type == CellType::Food {
-                                // Found food, mark for removal and add energy
-                                food_to_remove.push(*food_cell);
-                                updated_organism.energy += 1;
-                                // Log for debugging
-                                println!(
-                                    "Organism found food at ({}, {}), energy now: {}",
-                                    food_cell.i, food_cell.j, updated_organism.energy
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Check if organism has enough energy to reproduce
-                if updated_organism.energy >= 3 {
-                    if let Some(offspring) = self.try_reproduce(&updated_organism) {
-                        // Log reproduction
-                        println!(
-                            "Organism reproduced! New organism with {} cells",
-                            offspring.cells.len()
-                        );
-
-                        // Add offspring cells to global cells collection
-                        for cell in &offspring.cells {
-                            self.cells.insert(*cell);
-                        }
-
-                        // Add offspring to new organisms list
-                        new_organisms.insert(offspring);
-
-                        // Reduce parent's energy
-                        updated_organism.energy -= 3;
-                    }
-                }
-
-                // Add updated organism to new set
-                new_organisms.insert(updated_organism);
-            }
-        }
-
-        // Helper method for the Life struct to handle reproduction
-
-        fn try_reproduce(&self, parent: &Organism) -> Option<Organism> {
-            use rand::prelude::SliceRandom;
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-
-            // Directions to try for reproduction
-            let directions = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-            // Try each direction randomly
-            let mut shuffled_dirs = directions.to_vec();
-            shuffled_dirs.shuffle(&mut rng);
-
-            for (dx, dy) in shuffled_dirs {
-                let mut offspring_cells = FxHashSet::default();
-                let mut can_place = true;
-
-                // For each cell in parent, create corresponding cell in offspring
-                for cell in &parent.cells {
-                    let new_i = cell.i + dy;
-                    let new_j = cell.j + dx;
-                    let new_cell = Cell {
-                        i: new_i,
-                        j: new_j,
-                        cell_type: CellType::Alive,
-                    };
-
-                    // Check if position is already occupied
-                    if self.cells.contains(&new_cell) {
-                        can_place = false;
-                        break;
-                    }
-
-                    offspring_cells.insert(new_cell);
-                }
-
-                if can_place && !offspring_cells.is_empty() {
-                    return Some(Organism {
-                        cells: offspring_cells,
-                        energy: 1, // Start with minimal energy
-                    });
-                }
-            }
-
-            None
-        }
-
-        // Fixed adjacent_food method in Organism struct
-        fn adjacent_food(&self, life: &Life) -> FxHashSet<Cell> {
-            let mut food_cells = FxHashSet::default();
-
-            for cell in &self.cells {
-                for neighbor in Cell::neighbors(*cell) {
-                    // Check if this neighbor is a food cell
-                    if life.cells.contains(&neighbor) && neighbor.cell_type == CellType::Food {
-                        food_cells.insert(neighbor);
-                    }
-                }
-            }
-
-            food_cells
-        }
-        */
-
-        const REPRODUCTION_COST: usize = 3;
-        const REPRODUCTION_PADDING: isize = 1;
-
         fn tick(&mut self) {
             // Phase 1: Move organisms
+            self.grow_food();
             self.move_organisms();
-
-            // Phase 2: Consume food and gain energy
-            let mut organisms: Vec<Organism> = self.organisms.drain().collect();
-            for organism in &mut organisms {
-                organism.consume_food(self);
-            }
-            self.organisms.extend(organisms);
-
-            // Phase 3: Handle reproduction
-            self.handle_reproduction();
+            self.consume_food();
+            self.reproduce_organisms();
         }
-
-        fn handle_reproduction(&mut self) {
-            let mut new_organisms = FxHashSet::default();
-            let mut cells_to_remove = FxHashSet::default();
-
-            for organism in &self.organisms {
-                if organism.energy < Self::REPRODUCTION_COST {
-                    new_organisms.insert(organism.clone());
-                    continue;
-                }
-
-                if let Some((offspring, consumed_food)) = self.try_reproduce(organism) {
-                    new_organisms.insert(offspring);
-                    let mut parent = organism.clone();
-                    parent.energy -= Self::REPRODUCTION_COST;
-                    new_organisms.insert(parent);
-                    cells_to_remove.extend(consumed_food);
-                } else {
-                    new_organisms.insert(organism.clone());
-                }
-            }
-
-            self.organisms = new_organisms;
-            self.cells.retain(|c| !cells_to_remove.contains(c));
-        }
-
-        fn try_reproduce(&self, parent: &Organism) -> Option<(Organism, FxHashSet<Cell>)> {
-            let (min_j, max_j, min_i, max_i) = self.organism_bounding_box(parent);
-            let width = max_j - min_j + 1;
-            let height = max_i - min_i + 1;
-
-            let directions = [
-                (1, 0, width),   // Right (needs width spacing)
-                (-1, 0, width),  // Left (needs width spacing)
-                (0, 1, height),  // Down (needs height spacing)
-                (0, -1, height), // Up (needs height spacing)
-            ];
-
-            for (dx, dy, spacing) in directions {
-                if let Some(result) =
-                    self.check_reproduction(parent, dx, dy, spacing + Self::REPRODUCTION_PADDING)
-                {
-                    return Some(result);
-                }
-            }
-            None
-        }
-
-        fn organism_bounding_box(&self, organism: &Organism) -> (isize, isize, isize, isize) {
-            organism.cells.iter().fold(
-                (isize::MAX, isize::MIN, isize::MAX, isize::MIN),
-                |(min_j, max_j, min_i, max_i), cell| {
-                    (
-                        min_j.min(cell.j),
-                        max_j.max(cell.j),
-                        min_i.min(cell.i),
-                        max_i.max(cell.i),
-                    )
-                },
-            )
-        }
-
-        fn check_reproduction(
-            &self,
-            parent: &Organism,
-            dx: isize,
-            dy: isize,
-            spacing: isize,
-        ) -> Option<(Organism, FxHashSet<Cell>)> {
-            let mut offspring_cells = FxHashSet::default();
-            let mut consumed_food = FxHashSet::default();
-            let mut valid = true;
-
-            // Check reproduction path and target area
-            for cell in &parent.cells {
-                // Check path cells
-                for step in 1..=spacing {
-                    let check_cell = Cell {
-                        j: cell.j + dx * step,
-                        i: cell.i + dy * step,
-                        cell_type: CellType::Alive,
-                    };
-
-                    if let Some(existing) = self.cells.get(&check_cell) {
-                        match existing.cell_type {
-                            CellType::Alive => {
-                                valid = false;
-                                break;
-                            }
-                            CellType::Food => {
-                                consumed_food.insert(check_cell);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                // Create offspring cell
-                let new_cell = Cell {
-                    j: cell.j + dx * spacing,
-                    i: cell.i + dy * spacing,
-                    cell_type: CellType::Alive,
-                };
-                offspring_cells.insert(new_cell);
-            }
-
-            if valid && !consumed_food.is_empty() {
-                Some((Organism::new(offspring_cells), consumed_food))
-            } else {
-                None
-            }
-        }
-
-        /*
-
-        fn tick(&mut self) {
-            /*
-            let mut adjacent_life = FxHashMap::default();
-            // Counts the number of neighbours around a given cell, for each cell
-            for cell in &self.cells {
-                let _ = adjacent_life.entry(*cell).or_insert(0);
-
-                for neighbor in Cell::neighbors(*cell) {
-                    if neighbor.cell_type == CellType::Alive {
-                        let amount = adjacent_life.entry(neighbor).or_insert(0);
-                        *amount += 1;
-                    }
-                }
-            }
-
-            for (cell, amount) in &adjacent_life {
-                match amount {
-                    2 => {}
-                    3 => {
-                        let _ = self.cells.insert(*cell);
-                    }
-                    _ => {
-                        if cell.cell_type == CellType::Alive {
-                            let _ = self.cells.remove(cell);
-                        }
-                    }
-                }
-            }
-
-            for mut organism in &self.organisms {
-                for &cell in &organism.cells {
-                    let _ = self.cells.remove(&cell);
-                    let _ = self.cells.insert(Cell {
-                        i: cell.i,
-                        j: cell.j + 1,
-                        cell_type: CellType::Alive,
-                    });
-                }
-            }
-
-            let mut new_organisms = FxHashSet::default();
-            let mut new_cells = self.cells.clone(); // Keep all existing cells
-
-            for organism in &self.organisms {
-                let mut new_organism_cells = FxHashSet::default();
-
-                // Remove old organism cells before updating positions
-                for cell in &organism.cells {
-                    new_cells.remove(cell); // Remove old position from grid
-                }
-
-                // Move the entire organism to the right
-                for cell in &organism.cells {
-                    let new_cell = Cell {
-                        i: cell.i,                 // Maintain row position
-                        j: cell.j + 1,             // Move right
-                        cell_type: cell.cell_type, // Keep cell type
-                    };
-
-                    new_organism_cells.insert(new_cell);
-                    new_cells.insert(new_cell); // Add new position to grid
-                }
-
-                // Store updated organism
-                new_organisms.insert(Organism {
-                    cells: new_organism_cells,
-                });
-            }
-
-            // Update Life struct
-            self.organisms = new_organisms;
-            self.cells = new_cells; // Ensure proper rendering     }
-            */
-
-            self.move_organisms();
-            self.handle_reproduction();
-        }
-
-        */
 
         pub fn iter(&self) -> impl Iterator<Item = &Cell> {
             self.cells.iter()
+        }
+
+        /// Reproduction cost: energy that must be expended to reproduce.
+        const REPRODUCTION_COST: usize = 3;
+        /// The gap (in cell units) between the parent and the offspring.
+        const REPRODUCTION_GAP: isize = 1;
+
+        /// For each organism that has energy ≥ 3, try to reproduce by placing an offspring
+        /// next to it (left, right, up, or down) provided the destination area is empty.
+        pub fn reproduce_organisms(&mut self) {
+            // Collect new organisms in a temporary vector.
+            let mut new_organisms = Vec::new();
+
+            for organism in &mut self.organisms {
+                if organism.energy < Self::REPRODUCTION_COST {
+                    continue;
+                }
+
+                if Life::chance(70.0) {
+                    continue;
+                }
+
+                // Compute the parent's bounding box
+                let (min_j, max_j, min_i, max_i) = organism.bounding_box();
+                let width = max_j - min_j + 1;
+                let height = max_i - min_i + 1;
+
+                // Define the candidate offsets for reproduction:
+                // right, left, down, up. The offset is parent's dimension plus a gap.
+                let candidates = [
+                    (width + Self::REPRODUCTION_GAP, 0),     // right
+                    (-(width + Self::REPRODUCTION_GAP), 0),  // left
+                    (0, height + Self::REPRODUCTION_GAP),    // down
+                    (0, -(height + Self::REPRODUCTION_GAP)), // up
+                ];
+
+                // Try each candidate direction until one works.
+                let mut reproduced = false;
+                for &(dx, dy) in &candidates {
+                    // Generate the offspring cells by offsetting each parent's cell.
+                    let offspring_cells: Vec<Cell> = organism
+                        .cells
+                        .iter()
+                        .map(|cell| Cell {
+                            i: cell.i + dy,
+                            j: cell.j + dx,
+                            cell_type: cell.cell_type, // Presume the same type (Alive)
+                        })
+                        .collect();
+
+                    // Check if any of these new cells already exist in the world's grid.
+                    // (You might wish to add additional criteria here.)
+                    let conflict = offspring_cells
+                        .iter()
+                        .any(|offspring_cell| self.cells.contains(offspring_cell));
+                    if conflict {
+                        continue; // try next candidate direction
+                    }
+
+                    // No conflict found: create the offspring organism.
+                    let offspring = Organism::new(offspring_cells.clone());
+                    // Deduct reproduction cost from the parent.
+                    organism.energy -= Self::REPRODUCTION_COST;
+                    // Add offspring cells to the world's grid.
+                    for cell in offspring_cells {
+                        self.cells.push(cell);
+                    }
+                    // Save the new organism.
+                    new_organisms.push(offspring);
+                    reproduced = true;
+                    break;
+                }
+                // Optionally, if reproduction fails in all directions, you could log or handle that case.
+                if !reproduced {
+                    // For example: println!("Organism at {:?} could not reproduce due to space constraints.", organism.bounding_box());
+                }
+            }
+
+            // Add all new organisms to the Life structure.
+            self.organisms.extend(new_organisms);
         }
     }
 
     // I am going to need to impelement a structure for an organism, and instead of cells were gonna have to make separate function to separate organisms
     impl std::iter::FromIterator<Cell> for Life {
         fn from_iter<I: IntoIterator<Item = Cell>>(iter: I) -> Self {
-            let organisms: FxHashSet<Organism> = FxHashSet::default();
+            let organisms: Vec<Organism> = Vec::new();
             Life {
                 cells: iter.into_iter().collect(),
                 organisms,
@@ -1399,6 +1184,7 @@ mod grid {
         Empty,
         Alive,
         Food,
+        Grower,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
