@@ -11,6 +11,7 @@ use iced::{Center, Element, Fill, Subscription, Task, Theme};
 use std::time::Duration;
 
 use rand::Rng;
+
 use std::collections::VecDeque;
 
 pub fn main() -> iced::Result {
@@ -189,6 +190,7 @@ mod grid {
     use iced::widget::canvas::event::{self, Event};
     use iced::widget::canvas::{Cache, Canvas, Frame, Geometry, Path, Text};
     use iced::{Color, Element, Fill, Point, Rectangle, Renderer, Size, Theme, Vector};
+    use rand::Rng;
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::VecDeque;
     use std::future::Future;
@@ -249,7 +251,7 @@ mod grid {
                 .map(|(i, j)| Cell {
                     i,
                     j,
-                    cell_type: match Life::chance(50.0) {
+                    cell_type: match Life::chance(90.0) {
                         true => CellType::Alive,
                         false => CellType::Grower,
                     },
@@ -551,7 +553,7 @@ mod grid {
                             frame.fill_rectangle(
                                 Point::new(cell.j as f32, cell.i as f32),
                                 Size::UNIT,
-                                Color::from_rgb(0.0, 250.0, 0.0),
+                                Color::from_rgb(50.0, 27.0, 0.0),
                             )
                         }
                     }
@@ -601,16 +603,23 @@ mod grid {
                 }
 
                 let cell_count = self.state.cell_count();
+                let organism_count = self.state.life.organisms.len();
 
                 frame.fill_text(Text {
                     content: format!(
-                        "{cell_count} cell{} @ {:?} ({})",
+                        "{organism_count} organisms, {cell_count} cell{} @ {:?} ({})",
                         if cell_count == 1 { "" } else { "s" },
                         self.last_tick_duration,
                         self.last_queued_ticks
                     ),
                     ..text
                 });
+                /*
+                frame.fill_text(Text {
+                    content: format!("{organism_count}"),
+                    ..text
+                });
+                */
 
                 frame.into_geometry()
             };
@@ -748,11 +757,27 @@ mod grid {
     pub struct Organism {
         cells: Vec<Cell>,
         energy: usize,
+        able_to_move: bool,
     }
 
     impl Organism {
+        const NEW_ORGANISM_ENERGY: usize = 100;
+
         fn new(cells: Vec<Cell>) -> Self {
-            Organism { cells, energy: 0 }
+            Organism {
+                cells: cells.clone(),
+                energy: Organism::NEW_ORGANISM_ENERGY,
+                able_to_move: true, // Organism::check_if_can_move(cells),
+            }
+        }
+
+        fn check_if_can_move(cells: Vec<Cell>) -> bool {
+            for cell in cells {
+                if cell.cell_type == CellType::Mover {
+                    return true;
+                }
+            }
+            false
         }
 
         fn len(&self) -> usize {
@@ -790,27 +815,6 @@ mod grid {
             food
         }
 
-        pub fn consume_food(&mut self, life: &mut Life) {
-            let mut gained_energy = 0;
-            let mut food_to_remove = Vec::new();
-
-            for cell in &self.cells {
-                for neighbor in Cell::neighbors(*cell) {
-                    if let Some(food_cell) = life.cells.iter().find(|c| **c == neighbor) {
-                        if food_cell.cell_type == CellType::Food {
-                            gained_energy += 1;
-                            if !food_to_remove.contains(food_cell) {
-                                food_to_remove.push(*food_cell);
-                            }
-                        }
-                    }
-                }
-            }
-
-            self.energy += gained_energy;
-            life.cells.retain(|c| !food_to_remove.contains(c));
-        }
-
         /// Helper: Compute the bounding box of the organism as (min_j, max_j, min_i, max_i)
         pub fn bounding_box(&self) -> (isize, isize, isize, isize) {
             let min_j = self.cells.iter().map(|c| c.j).min().unwrap_or(0);
@@ -830,7 +834,11 @@ mod grid {
     }
 
     impl Life {
-        const CHANCE_TO_EAT: f64 = 50.0;
+        const CHANCE_TO_EAT: f64 = 80.0;
+        const MUTATION_RATE: f64 = 50.0;
+        const CHANCE_TO_SKIP_REPRODUCTION: f64 = 60.0;
+        const CHANCE_TO_GROW_FOOD: f64 = 1.0;
+        const ENERGY_FROM_FOOD: usize = 5;
 
         fn len(&self) -> usize {
             self.cells.len()
@@ -902,6 +910,9 @@ mod grid {
                             .iter()
                             .any(|c| c.i == new_cell.i && c.j == new_cell.j)
                         {
+                            if Life::chance(Life::CHANCE_TO_GROW_FOOD) {
+                                return;
+                            }
                             new_food_cells.push(new_cell);
                             break; // Grow only one food per cycle
                         }
@@ -939,7 +950,7 @@ mod grid {
                         if let Some(pos) = new_cells.iter().position(|c| *c == neighbor) {
                             if Life::chance(Life::CHANCE_TO_EAT) {
                                 food_cells_to_remove.push(pos);
-                                organism.energy += 1; // Increase energy
+                                organism.energy += Self::ENERGY_FROM_FOOD; // Increase energy
                             }
                         }
                     }
@@ -1003,8 +1014,14 @@ mod grid {
             let mut rng = rand::thread_rng();
 
             for organism in &self.organisms {
+                /*
+                if !organism.able_to_move {
+                    continue;
+                }
+                */
                 let mut new_organism_cells = Vec::new();
                 let mut can_move = true;
+                let mut energy_change: usize = 0;
 
                 // Random movement: right (+1, 0), left (-1, 0), up (0, -1), down (0, +1)
                 let (dx, dy) = match rng.gen_range(0..4) {
@@ -1050,6 +1067,7 @@ mod grid {
                         new_organism_cells.push(new_cell);
                         new_cells.push(new_cell);
                     }
+                    energy_change = 1
                 } else {
                     // If movement is not possible, keep the organism in place
                     for cell in &organism.cells {
@@ -1058,9 +1076,13 @@ mod grid {
                             new_cells.push(*cell);
                         }
                     }
+                    energy_change = 0;
                 }
-
-                new_organisms.push(Organism::new(new_organism_cells));
+                new_organisms.push(Organism {
+                    cells: new_organism_cells,
+                    energy: organism.energy - 1,
+                    able_to_move: organism.able_to_move,
+                });
             }
 
             // Update the world's state
@@ -1069,10 +1091,12 @@ mod grid {
         }
         fn tick(&mut self) {
             // Phase 1: Move organisms
+
             self.grow_food();
             self.move_organisms();
             self.consume_food();
-            self.reproduce_organisms();
+            self.cull_dead_organisms();
+            self.reproduce_organism_test_again();
         }
 
         pub fn iter(&self) -> impl Iterator<Item = &Cell> {
@@ -1080,7 +1104,7 @@ mod grid {
         }
 
         /// Reproduction cost: energy that must be expended to reproduce.
-        const REPRODUCTION_COST: usize = 3;
+        const REPRODUCTION_COST: usize = 200;
         /// The gap (in cell units) between the parent and the offspring.
         const REPRODUCTION_GAP: isize = 1;
 
@@ -1095,7 +1119,7 @@ mod grid {
                     continue;
                 }
 
-                if Life::chance(70.0) {
+                if Life::chance(Self::CHANCE_TO_SKIP_REPRODUCTION) {
                     continue;
                 }
 
@@ -1158,6 +1182,152 @@ mod grid {
             // Add all new organisms to the Life structure.
             self.organisms.extend(new_organisms);
         }
+
+        fn random_mutation() -> Option<CellType> {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let NewType = match rng.gen_range(0..1) {
+                0 => CellType::Alive,
+                1 => CellType::Grower,
+                _ => CellType::Alive,
+            };
+            Some(NewType)
+        }
+
+        pub fn reproduce_organism_test_again(&mut self) {
+            // Collect new organisms in a temporary vector.
+            let mut new_organisms = Vec::new();
+
+            for organism in &mut self.organisms {
+                if organism.energy < Self::REPRODUCTION_COST {
+                    continue;
+                }
+
+                if Life::chance(70.0) {
+                    continue;
+                }
+
+                // Compute the parent's bounding box.
+                let (min_j, max_j, min_i, max_i) = organism.bounding_box();
+                let width = max_j - min_j + 1;
+                let height = max_i - min_i + 1;
+
+                // Define candidate offsets for reproduction:
+                // right, left, down, up. The offset is parent's dimension plus a gap.
+                let candidates = [
+                    (width + Self::REPRODUCTION_GAP, 0),     // right
+                    (-(width + Self::REPRODUCTION_GAP), 0),  // left
+                    (0, height + Self::REPRODUCTION_GAP),    // down
+                    (0, -(height + Self::REPRODUCTION_GAP)), // up
+                ];
+
+                // Try each candidate direction until one works.
+                let mut reproduced = false;
+                for &(dx, dy) in &candidates {
+                    // Generate the offspring cells by offsetting each parent's cell.
+                    let mut offspring_cells: Vec<Cell> = organism
+                        .cells
+                        .iter()
+                        .map(|cell| {
+                            let mut new_cell = Cell {
+                                i: cell.i + dy,
+                                j: cell.j + dx,
+                                cell_type: cell.cell_type, // Default to the same type.
+                            };
+
+                            // Apply mutation with a set probability.
+                            if Life::chance(Self::MUTATION_RATE * 100.0) {
+                                if let Some(mutated_type) = Cell::random_type() {
+                                    new_cell.cell_type = mutated_type;
+                                }
+                            }
+                            new_cell
+                        })
+                        .collect();
+
+                    // Check if any of these new cells already exist in the world's grid.
+                    let conflict = offspring_cells
+                        .iter()
+                        .any(|offspring_cell| self.cells.contains(offspring_cell));
+                    if conflict {
+                        continue; // Try next candidate direction.
+                    }
+
+                    // Introduce a random new cell adjacent to the offspring (max once per evolution).
+                    if Life::chance(Self::MUTATION_RATE) {
+                        if !offspring_cells.is_empty() {
+                            // Pick a random cell from the offspring.
+                            let random_index =
+                                rand::thread_rng().gen_range(0..offspring_cells.len());
+                            let base_cell = offspring_cells[random_index];
+                            // Allow mutation offsets in all four directions.
+                            let mutation_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                            let offset_index =
+                                rand::thread_rng().gen_range(0..mutation_offsets.len());
+                            let (mx, my) = mutation_offsets[offset_index];
+                            let new_cell = Cell {
+                                i: base_cell.i + my,
+                                j: base_cell.j + mx,
+                                cell_type: Cell::random_type().unwrap_or(base_cell.cell_type),
+                            };
+                            // Only add if that spot is empty.
+                            if !self.cells.contains(&new_cell) {
+                                offspring_cells.push(new_cell);
+                            }
+                        }
+                    }
+
+                    // No conflict found: create the offspring organism.
+                    let offspring = Organism::new(offspring_cells.clone());
+                    // Deduct reproduction cost from the parent.
+                    organism.energy -= Self::REPRODUCTION_COST;
+                    // Add offspring cells to the world's grid.
+                    for cell in offspring_cells {
+                        self.cells.push(cell);
+                    }
+                    // Save the new organism.
+                    new_organisms.push(offspring);
+                    reproduced = true;
+                    break;
+                }
+                // Optionally, if reproduction fails in all directions, you could log or handle that case.
+                if !reproduced {
+                    // e.g., println!("Organism at {:?} could not reproduce due to space constraints.", organism.bounding_box());
+                }
+            }
+
+            // Add all new organisms to the Life structure.
+            self.organisms.extend(new_organisms);
+        }
+
+        pub fn cull_dead_organisms(&mut self) {
+            let mut new_food_cells = Vec::new();
+
+            // Iterate through organisms and convert dead ones into food
+            self.organisms.retain(|organism| {
+                if organism.energy <= 0 {
+                    // Convert all its cells into food and add to new food list
+                    for cell in &organism.cells {
+                        new_food_cells.push(Cell {
+                            i: cell.i,
+                            j: cell.j,
+                            cell_type: CellType::Food,
+                        });
+                    }
+                    false // Remove the organism from self.organisms
+                } else {
+                    true // Keep the organism if it's still alive
+                }
+            });
+
+            self.cells.retain(|cell| {
+                !new_food_cells
+                    .iter()
+                    .any(|food| food.i == cell.i && food.j == cell.j)
+            });
+
+            self.cells.extend(new_food_cells);
+        }
     }
 
     // I am going to need to impelement a structure for an organism, and instead of cells were gonna have to make separate function to separate organisms
@@ -1185,6 +1355,7 @@ mod grid {
         Alive,
         Food,
         Grower,
+        Mover,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1226,6 +1397,17 @@ mod grid {
 
         pub fn is_food(&self) -> bool {
             self.cell_type == CellType::Food
+        }
+
+        pub fn random_type() -> Option<CellType> {
+            use CellType::*;
+            let types = [Alive, Grower, Mover]; // Define available types
+            if types.is_empty() {
+                None
+            } else {
+                let random_index = rand::thread_rng().gen_range(0..types.len());
+                Some(types[random_index])
+            }
         }
     }
 
