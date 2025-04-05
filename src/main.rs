@@ -1236,7 +1236,7 @@ mod grid {
                             };
 
                             // Apply mutation with a set probability.
-                            if Life::chance(Self::MUTATION_RATE * 100.0) {
+                            if Life::chance(Self::MUTATION_RATE) {
                                 if let Some(mutated_type) = Cell::random_type() {
                                     new_cell.cell_type = mutated_type;
                                 }
@@ -1401,7 +1401,7 @@ mod grid {
 
         pub fn random_type() -> Option<CellType> {
             use CellType::*;
-            let types = [Alive, Grower, Mover]; // Define available types
+            let types = [Alive, Grower]; // Define available types
             if types.is_empty() {
                 None
             } else {
