@@ -1,5 +1,6 @@
 //! This example showcases an interactive version of the Game of Life, invented
 //! by John Conway. It leverages a `Canvas` together with other widgets.
+mod database;
 mod preset;
 
 use grid::Grid;
@@ -25,13 +26,14 @@ pub fn main() -> iced::Result {
         .run()
 }
 
-struct LifeSim {
+pub struct LifeSim {
     grid: Grid,
     is_playing: bool,
     queued_ticks: usize,
     speed: usize,
     next_speed: Option<usize>,
     version: usize,
+    db: database::WorldDatabase,
 }
 
 #[derive(Debug, Clone)]
@@ -44,10 +46,15 @@ enum Message {
     Clear,
     SpeedChanged(f32),
     PresetPicked(Preset),
+
+    SaveState,
+    LoadState,
 }
 
 impl LifeSim {
     fn new() -> Self {
+        let db = database::WorldDatabase::new("life_simulation.db").unwrap();
+
         Self {
             grid: Grid::default(),
             is_playing: false,
@@ -55,6 +62,7 @@ impl LifeSim {
             speed: 5,
             next_speed: None,
             version: 0,
+            db,
         }
     }
 
@@ -100,6 +108,38 @@ impl LifeSim {
             Message::PresetPicked(new_preset) => {
                 self.grid = Grid::from_preset(new_preset);
                 self.version += 1;
+            }
+            Message::SaveState => {
+                let state = database::WorldState {
+                    organisms: self.grid.state.life.organisms.clone(),
+                    free_cells: self
+                        .grid
+                        .state
+                        .life
+                        .cells
+                        .iter()
+                        .filter(|c| {
+                            !self
+                                .grid
+                                .state
+                                .life
+                                .organisms
+                                .iter()
+                                .any(|o| o.cells.contains(c))
+                        })
+                        .cloned()
+                        .collect(),
+                    version: self.version,
+                };
+                self.db.save_state(&state).ok();
+            }
+            Message::LoadState => {
+                if let Ok(state) = self.db.load_latest_state() {
+                    self.grid.state.life.organisms = state.organisms;
+                    self.grid.state.life.cells = state.free_cells;
+                    self.version = state.version;
+                    self.grid.life_cache.clear();
+                }
             }
         }
 
@@ -171,7 +211,9 @@ fn view_controls<'a>(
             pick_list(preset::ALL, Some(preset), Message::PresetPicked),
             button("Clear")
                 .on_press(Message::Clear)
-                .style(button::danger)
+                .style(button::danger),
+            button("Save").on_press(Message::SaveState),
+            button("Load").on_press(Message::LoadState),
         ]
         .spacing(10)
     ]
@@ -181,7 +223,7 @@ fn view_controls<'a>(
     .into()
 }
 
-mod grid {
+pub mod grid {
     use crate::Preset;
     use iced::alignment;
     use iced::mouse;
@@ -192,15 +234,17 @@ mod grid {
     use iced::{Color, Element, Fill, Point, Rectangle, Renderer, Size, Theme, Vector};
     use rand::Rng;
     use rustc_hash::{FxHashMap, FxHashSet};
+    use serde::Deserialize;
+    use serde::Serialize;
     use std::collections::VecDeque;
     use std::future::Future;
     use std::ops::RangeInclusive;
     use std::time::{Duration, Instant};
 
     pub struct Grid {
-        state: State,
-        preset: Preset,
-        life_cache: Cache,
+        pub state: State,
+        pub preset: Preset,
+        pub life_cache: Cache,
         grid_cache: Cache,
         translation: Vector,
         scaling: f32,
@@ -681,10 +725,10 @@ mod grid {
     }
 
     #[derive(Default)]
-    struct State {
-        life: Life,
-        births: FxHashSet<Cell>,
-        is_ticking: bool,
+    pub struct State {
+        pub life: Life,
+        pub births: FxHashSet<Cell>,
+        pub is_ticking: bool,
     }
 
     impl State {
@@ -753,11 +797,12 @@ mod grid {
         }
     }
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     pub struct Organism {
-        cells: Vec<Cell>,
-        energy: usize,
-        able_to_move: bool,
+        pub id: Option<usize>, // will be generated in the database
+        pub cells: Vec<Cell>,
+        pub energy: usize,
+        pub able_to_move: bool,
     }
 
     impl Organism {
@@ -765,6 +810,7 @@ mod grid {
 
         fn new(cells: Vec<Cell>) -> Self {
             Organism {
+                id: None,
                 cells: cells.clone(),
                 energy: Organism::NEW_ORGANISM_ENERGY,
                 able_to_move: true, // Organism::check_if_can_move(cells),
@@ -829,8 +875,8 @@ mod grid {
 
     #[derive(Clone, Default)]
     pub struct Life {
-        cells: Vec<Cell>,
-        organisms: Vec<Organism>,
+        pub cells: Vec<Cell>,
+        pub organisms: Vec<Organism>,
     }
 
     impl Life {
@@ -1079,6 +1125,7 @@ mod grid {
                     energy_change = 0;
                 }
                 new_organisms.push(Organism {
+                    id: None,
                     cells: new_organism_cells,
                     energy: organism.energy - 1,
                     able_to_move: organism.able_to_move,
@@ -1349,7 +1396,7 @@ mod grid {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub enum CellType {
         Empty,
         Alive,
@@ -1358,11 +1405,11 @@ mod grid {
         Mover,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     pub struct Cell {
-        i: isize,
-        j: isize,
-        cell_type: CellType,
+        pub i: isize,
+        pub j: isize,
+        pub cell_type: CellType,
     }
 
     impl Cell {
