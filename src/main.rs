@@ -1127,7 +1127,7 @@ pub mod grid {
                 new_organisms.push(Organism {
                     id: None,
                     cells: new_organism_cells,
-                    energy: organism.energy - 1,
+                    energy: if organism.energy > 0 {organism.energy-1} else {0},
                     able_to_move: organism.able_to_move,
                 });
             }
